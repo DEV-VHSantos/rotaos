@@ -1,133 +1,226 @@
 import {parseMatrix,parseSchedule,distribute,exportRows,slug,displayDate,normalize} from './engine.mjs';
 import {readWorkbook,createXlsx,makeZip,download} from './io.mjs';
-const $=id=>document.getElementById(id),state={matrixSheets:[],scheduleSheets:[],matrix:null,schedule:null,orders:[],page:0,pending:false,busy:false,demo:false,dirty:false};
-const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=id=>document.getElementById(id);
+const state={stage:1,matrixSheets:[],scheduleSheets:[],matrix:null,schedule:null,orders:[],page:0,pending:false,busy:false,reading:'',demo:false,dirty:false,downloaded:false};
+const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function message(text,error=false){$('message').hidden=!text;$('message').textContent=text;$('message').classList.toggle('error',error);}
 function dialog(title,html){$('dialogTitle').textContent=title;$('dialogBody').innerHTML=html;$('dialog').showModal();}
-function ready(){$('startupStatus').hidden=true;for(const id of ['reset','demo','matrixSheet','scheduleSheet'])$(id).disabled=state.busy;for(const kind of ['matrix','schedule'])$(kind+'File').disabled=state.busy;const ok=state.matrixSheets.length&&state.scheduleSheets.length&&!state.busy;$('process').disabled=!ok;$('readyText').textContent=state.busy?'Lendo arquivo no navegador…':ok?'Arquivos prontos. Você pode conferir a distribuição.':'Selecione os dois arquivos para começar.';}
-function clearResults(){state.dirty=false;state.orders=[];state.matrix=null;state.schedule=null;$('results').hidden=true;$('emptyState').hidden=false;for(const id of ['step2','step3'])$(id).classList.remove('current');$('step1').classList.add('current');$('navPendingCount').hidden=true;$('navDistribution').classList.add('active');$('navReview').classList.remove('active');}
-function setSheets(kind,sheets,name){state[kind+'Sheets']=sheets;$(kind+'Name').textContent=name;$(kind+'Check').textContent='✓';$(kind+'Sheet').innerHTML=sheets.map((s,i)=>'<option value="'+i+'">'+esc(s.name)+'</option>').join('');$(kind+'SheetField').hidden=sheets.length<=1;}
+function stage(number,scroll=true){
+ if(number!==1&&!state.orders.length)return;
+ state.stage=number;
+ $('filesStage').hidden=number!==1;$('results').hidden=number!==2;$('downloadsStage').hidden=number!==3;
+ for(let i=1;i<=3;i++){
+  const button=$('step'+i);button.classList.toggle('current',i===number);button.classList.toggle('complete',i<number);
+  if(i===number)button.setAttribute('aria-current','step');else button.removeAttribute('aria-current');
+ }
+ $('demoBanner').hidden=!state.demo;
+ if(scroll)window.scrollTo({top:0,behavior:'smooth'});
+}
+function ready(){
+ $('startupStatus').hidden=true;
+ const matrix=state.matrixSheets.length>0,schedule=state.scheduleSheets.length>0,count=Number(matrix)+Number(schedule);
+ $('fileCount').textContent=count+' de 2 arquivos';
+ $('reset').hidden=!count&&!state.orders.length;
+ for(const id of ['reset','startAgain','demo','matrixSheet','scheduleSheet','matrixRemove','scheduleRemove'])$(id).disabled=state.busy;
+ for(const kind of ['matrix','schedule'])$(kind+'File').disabled=state.busy;
+ $('process').disabled=!(matrix&&schedule)||state.busy;
+ for(const i of [2,3])$('step'+i).disabled=!state.orders.length||state.busy;
+ $('step1').disabled=state.busy;
+ const title=state.busy?'Lendo a planilha…':matrix&&schedule?'Tudo pronto para continuar':matrix?'Agora escolha o planejamento':schedule?'Agora escolha a matriz':'Escolha os dois arquivos para continuar';
+ $('readyTitle').textContent=title;
+ $('readyText').textContent=state.busy?'Aguarde a leitura terminar antes de selecionar outro arquivo.':matrix&&schedule?'Confira os arquivos acima. No próximo passo, você poderá revisar os responsáveis.':'A distribuição será feita aqui, no seu navegador.';
+ $('process').innerHTML=(state.orders.length?'Voltar à conferência':'Separar ordens e continuar')+'<span aria-hidden="true">→</span>';
+}
+function clearResults(){
+ state.orders=[];state.matrix=null;state.schedule=null;state.dirty=false;state.downloaded=false;state.page=0;state.pending=false;
+ $('downloadSuccess').hidden=true;stage(1);ready();
+}
+function mayReplace(){return !state.dirty||window.confirm('Trocar os arquivos apaga a conferência atual. Baixe os resultados que deseja guardar antes de continuar. Continuar?');}
+function errorFile(kind,text){$(kind+'Error').textContent=text;$(kind+'Error').hidden=!text;$(kind+'Drop').classList.toggle('has-error',!!text);}
+function fileEmpty(kind){
+ state[kind+'Sheets']=[];$(kind+'Name').textContent='Nenhum arquivo escolhido';$(kind+'Check').textContent='Aguardando arquivo';
+ $(kind+'ButtonText').textContent=kind==='matrix'?'Escolher matriz':'Escolher planejamento';$(kind+'Remove').hidden=true;$(kind+'SheetField').hidden=true;
+ $(kind+'Drop').classList.remove('loaded');$(kind+'File').value='';errorFile(kind,'');
+}
+function setSheets(kind,sheets,name){
+ state[kind+'Sheets']=sheets;$(kind+'Name').textContent=name;$(kind+'Check').textContent='Arquivo selecionado';
+ $(kind+'ButtonText').textContent='Trocar arquivo';$(kind+'Remove').hidden=false;$(kind+'Drop').classList.add('loaded');errorFile(kind,'');
+ $(kind+'Sheet').innerHTML=sheets.map((s,i)=>'<option value="'+i+'">'+esc(s.name)+'</option>').join('');
+ $(kind+'SheetField').hidden=sheets.length<=1;$(kind+'Sheet').dataset.previous='0';
+}
 async function load(kind,file){
- if(!file)return;
- if(state.busy)return;
- state.busy=true;ready();message('Lendo '+file.name+'...');clearResults();state[kind+'Sheets']=[];$(kind+'Check').textContent='';$(kind+'Name').textContent='Lendo arquivo...';
- try{const sheets=await readWorkbook(file);setSheets(kind,sheets,file.name);state.demo=false;message('Arquivo lido: '+file.name+'. O conteúdo permanece nesta sessão.');}
- catch(e){$(kind+'Name').textContent='Não foi possível ler o arquivo.';message(e.message,true);}
- finally{state.busy=false;$(kind+'File').value='';ready();}
+ if(!file||state.busy)return;
+ if(!mayReplace()){$(kind+'File').value='';return;}
+ if(state.demo)fileEmpty(kind==='matrix'?'schedule':'matrix');
+ state.busy=true;state.reading=kind;state.demo=false;clearResults();fileEmpty(kind);
+ $(kind+'Check').textContent='Lendo…';$(kind+'Name').textContent='Lendo arquivo…';$(kind+'Drop').classList.add('is-reading');ready();message('Lendo '+file.name+'…');
+ try{
+  const sheets=await readWorkbook(file);setSheets(kind,sheets,file.name);message('Arquivo lido: '+file.name+'.');
+ }catch(error){
+  $(kind+'Name').textContent='Não foi possível ler o arquivo.';$(kind+'Check').textContent='Confira o arquivo';
+  errorFile(kind,error.message);message(error.message,true);
+ }finally{
+  state.busy=false;state.reading='';$(kind+'File').value='';$(kind+'Drop').classList.remove('is-reading');ready();
+ }
 }
 for(const kind of ['matrix','schedule']){
- $(kind+'File').addEventListener('change',e=>load(kind,e.target.files[0]));
- $(kind+'Sheet').addEventListener('change',()=>{clearResults();message('Aba alterada. Distribua novamente para atualizar os resultados.');});
- const zone=$(kind+'Drop');zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('drag-over');});
+ $(kind+'File').addEventListener('change',event=>load(kind,event.target.files[0]));
+ $(kind+'Remove').addEventListener('click',()=>{
+  if(state.busy||!mayReplace())return;
+  fileEmpty(kind);state.demo=false;clearResults();ready();message('Arquivo removido. Escolha outro arquivo para continuar.');
+ });
+ $(kind+'Sheet').addEventListener('change',event=>{
+  if(!mayReplace()){event.target.value=event.target.dataset.previous||'0';return;}
+  event.target.dataset.previous=event.target.value;clearResults();errorFile(kind,'');ready();message('Aba alterada. Clique em Separar ordens e continuar para atualizar os resultados.');
+ });
+ const zone=$(kind+'Drop');
+ zone.addEventListener('dragover',event=>{event.preventDefault();if(!state.busy)zone.classList.add('drag-over');});
  zone.addEventListener('dragleave',()=>zone.classList.remove('drag-over'));
- zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('drag-over');if(e.dataTransfer.files.length!==1){message('Selecione um arquivo por área.',true);return;}load(kind,e.dataTransfer.files[0]);});
+ zone.addEventListener('drop',event=>{
+  event.preventDefault();zone.classList.remove('drag-over');
+  if(event.dataTransfer.files.length!==1){message('Arraste somente uma planilha por vez para cada quadro.',true);return;}
+  return load(kind,event.dataTransfer.files[0]);
+ });
 }
 function process(){
- try{
-  message('');const matrix=parseMatrix(state.matrixSheets[Number($('matrixSheet').value)].rows),schedule=parseSchedule(state.scheduleSheets[Number($('scheduleSheet').value)].rows);
-  const orders=distribute(schedule,matrix);state.matrix=matrix;state.schedule=schedule;state.orders=orders;state.dirty=true;state.page=0;state.pending=false;
-  $('search').value='';$('ownerFilter').innerHTML='<option value="">Todos os responsáveis</option><option value="pending">Sem responsável</option>'+matrix.owners.map(o=>'<option value="'+o.id+'">'+esc(o.name)+'</option>').join('');
-  $('results').hidden=false;$('emptyState').hidden=true;$('step1').classList.remove('current');$('step2').classList.add('current');$('step3').classList.remove('current');
-  $('resultMeta').textContent=(state.demo?'Demonstração fictícia · ':'')+schedule.orders.length+' ordens válidas · '+matrix.owners.length+' responsáveis na matriz';
-  renderSummary();renderTable();$('results').scrollIntoView({behavior:'smooth',block:'start'});
- }catch(e){message(e.message,true);}
+ if(state.busy)return;
+ if(state.orders.length){message('');stage(2);return;}
+ if(!state.matrixSheets.length||!state.scheduleSheets.length){message('Escolha a matriz e o planejamento antes de continuar.',true);return;}
+ let matrix,schedule;
+ try{matrix=parseMatrix(state.matrixSheets[Number($('matrixSheet').value)]?.rows||[]);errorFile('matrix','');}
+ catch(error){stage(1);errorFile('matrix',error.message);message('Confira a matriz: '+error.message,true);return;}
+ try{schedule=parseSchedule(state.scheduleSheets[Number($('scheduleSheet').value)]?.rows||[]);errorFile('schedule','');}
+ catch(error){stage(1);errorFile('schedule',error.message);message('Confira o planejamento: '+error.message,true);return;}
+ state.matrix=matrix;state.schedule=schedule;state.orders=distribute(schedule,matrix);state.dirty=true;state.downloaded=false;state.page=0;state.pending=false;
+ $('search').value='';$('ownerFilter').innerHTML='<option value="">Todos os responsáveis</option><option value="pending">Sem responsável</option>'+matrix.owners.map(o=>'<option value="'+o.id+'">'+esc(o.name)+'</option>').join('');
+ $('resultMeta').textContent='Veja a distribuição abaixo. Você pode ajustar qualquer responsável antes de baixar.';
+ $('downloadSuccess').hidden=true;renderSummary();renderTable();message('');ready();stage(2);
 }
 $('process').addEventListener('click',process);
-function filtered(){
- const q=normalize($('search').value),owner=$('ownerFilter').value;
- return state.orders.filter(o=>(!state.pending||!o.ownerId)&&(!owner||(owner==='pending'?!o.ownerId:o.ownerId===owner))&&(!q||normalize(o.wo+' '+o.description+' '+o.location).includes(q)));
-}
-function groups(){const g=new Map();for(const o of state.orders){const id=o.ownerId||'pending';if(!g.has(id))g.set(id,[]);g.get(id).push(o);}return g;}
+function groups(){const result=new Map();for(const order of state.orders){const id=order.ownerId||'pending';if(!result.has(id))result.set(id,[]);result.get(id).push(order);}return result;}
 function renderSummary(){
- const pending=state.orders.filter(o=>!o.ownerId).length,g=groups();
- $('totalStat').textContent=state.orders.length;$('assignedStat').textContent=state.orders.length-pending;$('pendingStat').textContent=pending;$('pendingBadge').textContent=pending;$('navPendingCount').textContent=pending;$('navPendingCount').hidden=pending===0;$('ownerStat').textContent=[...g.keys()].filter(k=>k!=='pending').length;
+ const total=state.orders.length,pending=state.orders.filter(o=>!o.ownerId).length,assigned=total-pending;
+ $('totalStat').textContent=total;$('assignedStat').textContent=assigned;$('pendingStat').textContent=pending;
+ $('pendingBadge').textContent=pending;$('navPendingCount').textContent=pending;$('navPendingCount').hidden=!pending;
+ $('reviewGuidance').classList.toggle('resolved',!pending);$('guidanceIcon').textContent=pending?'!':'✓';
+ $('reviewTitle').textContent=pending?(pending===1?'1 ordem precisa de um responsável':pending+' ordens precisam de um responsável'):'Todas as ordens têm responsável';
+ $('reviewText').textContent=pending?'Abra a lista abaixo e escolha quem deve receber essas ordens.':'Faça uma última conferência. Se estiver tudo certo, continue para os downloads.';
+ $('navReview').hidden=!pending;
+ $('continueHint').textContent=pending?'Ainda há '+pending+' ordem(ns) sem responsável. Elas serão incluídas em REVISAR.':'Tudo conferido? Siga para baixar as planilhas.';
+ $('assignmentProgress').max=total||1;$('assignmentProgress').value=assigned;
+ $('progressText').textContent=assigned+' de '+total+' ordens com responsável';
+ $('downloadPending').hidden=!pending;
+ $('downloadPendingTitle').textContent=pending===1?'Ainda há 1 ordem sem responsável':'Ainda há '+pending+' ordens sem responsável';
+ const destinations=groups();$('ownerStat').textContent=[...destinations.keys()].filter(k=>k!=='pending').length;
+ $('destinations').innerHTML=[...destinations].map(([id,orders])=>'<div class="destination'+(id==='pending'?' pending-destination':'')+'"><b>'+esc(id==='pending'?'Ordens sem responsável':state.matrix.owners.find(o=>o.id===id)?.name)+'</b><span>'+orders.length+' ordem'+(orders.length===1?'':'s')+'</span><button class="text-button" data-download="'+esc(id)+'">Baixar Excel</button></div>').join('');
  const notes=[];
  if(state.matrix.conflicts.length)notes.push(state.matrix.conflicts.length+' códigos da matriz têm mais de um responsável.');
- if(state.orders.some(o=>o.duplicate))notes.push('Há números de WO repetidos na origem. As linhas foram preservadas e marcadas para revisão.');
- if(state.matrix.warnings.length)notes.push(state.matrix.warnings.length+' entradas da matriz foram ignoradas por formato inválido.');
- if(state.schedule.ignored.length)notes.push(state.schedule.ignored.length+' linha(s) de rodapé ou sem WO válida foram ignoradas.');
- $('warnings').hidden=!notes.length;$('warnings').textContent=notes.join(' ');
- $('destinations').innerHTML=[...g].map(([id,orders])=>'<div class="destination"><b>'+esc(id==='pending'?'Pendentes de revisão':state.matrix.owners.find(o=>o.id===id)?.name)+'</b><span>'+orders.length+' ordem'+(orders.length===1?'':'s')+'</span><button class="text-button" data-download="'+esc(id)+'">Baixar Excel ↓</button></div>').join('');
- $('ignoredSummary').textContent='Linhas ignoradas ('+state.schedule.ignored.length+')';
- $('ignoredRows').innerHTML=state.schedule.ignored.length?state.schedule.ignored.map(o=>'<p>Linha '+o.row+': '+esc(o.value)+' · '+esc(o.reason)+'</p>').join(''):'<p>Nenhuma linha ignorada.</p>';
+ if(state.orders.some(o=>o.duplicate))notes.push('Existem números de WO repetidos. Todas as linhas foram mantidas. Confira a repetição com o planejamento antes de entregar.');
+ if(state.matrix.warnings.length)notes.push(state.matrix.warnings.length+' entradas da matriz não foram usadas por formato inválido.');
+ if(state.schedule.ignored.length)notes.push(state.schedule.ignored.length+' linha(s) de rodapé ou sem número válido não foram usadas.');
+ $('warnings').textContent=notes.join(' ');$('warnings').hidden=!notes.length;
+ $('readingSummary').textContent='Detalhes da leitura dos arquivos'+(notes.length?' · '+notes.length+' aviso(s)':'');
+ $('ignoredSummary').textContent='Linhas não usadas ('+state.schedule.ignored.length+')';
+ $('ignoredRows').innerHTML=state.schedule.ignored.length?state.schedule.ignored.map(o=>'<p>Linha '+o.row+': '+esc(o.value)+' — '+esc(o.reason)+'</p>').join(''):'<p>Nenhuma linha foi ignorada.</p>';
+}
+function filtered(){
+ const query=normalize($('search').value),owner=$('ownerFilter').value;
+ return state.orders.filter(order=>(!state.pending||!order.ownerId)&&(!owner||(owner==='pending'?!order.ownerId:owner===order.ownerId))&&(!query||normalize(order.wo+' '+order.description+' '+order.location).includes(query)));
 }
 function renderTable(){
- const rows=filtered(),size=20;state.page=Math.max(0,Math.min(state.page,Math.max(0,Math.ceil(rows.length/size)-1)));
- $('navDistribution').classList.toggle('active',!state.pending);$('navReview').classList.toggle('active',state.pending);$('allTab').classList.toggle('selected',!state.pending);$('pendingTab').classList.toggle('selected',state.pending);
- $('visibleCount').textContent=rows.length+' ordens no filtro';const slice=rows.slice(state.page*size,(state.page+1)*size);
- $('orderRows').innerHTML=slice.length?slice.map(o=>{
-  const ownerName=state.matrix.owners.find(p=>p.id===o.ownerId)?.name||'Selecione um responsável';
-  const explanation=o.ownerId?'<details class="row-details"><summary>Ver critério</summary><span class="reason">'+esc(o.reason)+'</span></details>':'<span class="reason pending-reason">'+esc(o.reason)+'</span>';
-  return '<tr><td><span class="wo">'+esc(o.wo)+'</span><span class="description">'+esc(o.description)+'</span></td><td><code class="location-code">'+esc(o.location||'—')+'</code></td><td><span class="date-cell">'+esc(displayDate(o.target))+'</span></td><td><span class="status-pill">'+esc(o.status||'—')+'</span></td><td><select data-assign="'+o.id+'" aria-label="Responsável da '+esc(o.wo)+'" title="'+esc(ownerName)+'"><option value="">Selecionar responsável</option>'+state.matrix.owners.map(p=>'<option value="'+p.id+'"'+(o.ownerId===p.id?' selected':'')+'>'+esc(p.name)+'</option>').join('')+'</select></td><td><span class="criterion'+(!o.ownerId?' pending':'')+'">'+esc(o.ownerId?o.method:'Precisa de revisão')+'</span>'+explanation+'</td></tr>';
- }).join(''):'<tr><td colspan="6">Nenhuma ordem corresponde a este filtro.</td></tr>';
- $('pageText').textContent=rows.length?((state.page*size)+1)+'–'+Math.min((state.page+1)*size,rows.length)+' de '+rows.length:'0 ordens';$('prevPage').disabled=state.page===0;$('nextPage').disabled=(state.page+1)*size>=rows.length;
+ const rows=filtered(),size=20;
+ state.page=Math.max(0,Math.min(state.page,Math.max(0,Math.ceil(rows.length/size)-1)));
+ $('allTab').classList.toggle('selected',!state.pending);$('pendingTab').classList.toggle('selected',state.pending);
+ $('allTab').setAttribute('aria-pressed',String(!state.pending));$('pendingTab').setAttribute('aria-pressed',String(state.pending));
+ $('visibleCount').textContent=rows.length+' ordens no filtro';
+ $('orderRows').innerHTML=rows.slice(state.page*size,(state.page+1)*size).map(order=>{
+  const owner=state.matrix.owners.find(o=>o.id===order.ownerId)?.name||'Escolha o responsável';
+  const explanation=order.ownerId?'<details class="row-details"><summary>Ver explicação</summary><span class="reason">'+esc(order.reason)+'</span></details>':'<span class="reason pending-reason">'+esc(order.reason)+'</span>';
+  return '<tr><td data-label="Ordem"><span class="wo">'+esc(order.wo)+'</span><span class="description">'+esc(order.description)+'</span></td><td data-label="Equipamento (LOCATION)"><code class="location-code">'+esc(order.location||'Não informado')+'</code></td><td data-label="Início previsto"><span class="date-cell">'+esc(displayDate(order.target))+'</span></td><td data-label="Status"><span class="status-pill">'+esc(order.status||'Não informado')+'</span></td><td data-label="Responsável"><select class="'+(!order.ownerId?'unassigned':'')+'" data-assign="'+order.id+'" aria-label="Responsável da ordem '+esc(order.wo)+'" title="'+esc(owner)+'"><option value="">Escolha o responsável</option>'+state.matrix.owners.map(o=>'<option value="'+o.id+'"'+(o.id===order.ownerId?' selected':'')+'>'+esc(o.name)+'</option>').join('')+'</select></td><td data-label="Como foi definido"><span class="criterion'+(!order.ownerId?' pending':'')+'">'+esc(order.ownerId?order.method:'Precisa de revisão')+'</span>'+explanation+'</td></tr>';
+ }).join('')||'<tr><td colspan="6">'+(state.pending&&!state.orders.some(o=>!o.ownerId)?'Nenhuma ordem sem responsável. Todas já têm um destino.':'Nenhuma ordem encontrada. Tente outra busca ou use Limpar filtros.')+'</td></tr>';
+ $('pageText').textContent=rows.length?(state.page*size+1)+'–'+Math.min((state.page+1)*size,rows.length)+' de '+rows.length:'0 ordens';
+ $('prevPage').disabled=state.page===0;$('nextPage').disabled=(state.page+1)*size>=rows.length;
 }
-$('search').addEventListener('input',()=>{state.page=0;renderTable();});
-$('ownerFilter').addEventListener('change',()=>{state.page=0;renderTable();});
+function clearFilters(pending=false){
+ state.pending=pending;state.page=0;$('search').value='';$('ownerFilter').value='';renderTable();
+}
+function reviewPending(){if(!state.orders.length){message('Selecione a matriz e o planejamento antes de conferir as ordens.');return;}message('');stage(2);clearFilters(true);$('ordersPanel').scrollIntoView({behavior:'smooth',block:'start'});}
+$('navReview').addEventListener('click',reviewPending);$('backToPending').addEventListener('click',reviewPending);
 $('allTab').addEventListener('click',()=>{state.pending=false;state.page=0;renderTable();});
 $('pendingTab').addEventListener('click',()=>{state.pending=true;state.page=0;renderTable();});
-$('clearFilters').addEventListener('click',()=>{state.pending=false;state.page=0;$('search').value='';$('ownerFilter').value='';renderTable();});
-$('prevPage').addEventListener('click',()=>{state.page--;renderTable();});
-$('nextPage').addEventListener('click',()=>{state.page++;renderTable();});
-$('orderRows').addEventListener('change',e=>{
- const id=e.target.dataset.assign;if(!id)return;const order=state.orders.find(o=>o.id===id);if(!order)return;
- const selected=e.target.value;if(selected&&!state.matrix.owners.some(o=>o.id===selected))return;
- state.dirty=true;order.ownerId=selected;order.method=selected?'Revisão manual':'revisar';order.reason=selected?'Responsável definido manualmente nesta sessão.':'Aguardando definição manual do responsável.';
- renderSummary();renderTable();
+$('navDistribution').addEventListener('click',()=>clearFilters());$('clearFilters').addEventListener('click',()=>clearFilters());
+$('search').addEventListener('input',()=>{state.page=0;renderTable();});
+$('ownerFilter').addEventListener('change',()=>{state.page=0;renderTable();});
+$('prevPage').addEventListener('click',()=>{state.page--;renderTable();});$('nextPage').addEventListener('click',()=>{state.page++;renderTable();});
+$('orderRows').addEventListener('change',event=>{
+ const order=state.orders.find(o=>o.id===event.target.dataset.assign);
+ if(!order)return;
+ const owner=event.target.value;if(owner&&!state.matrix.owners.some(o=>o.id===owner))return;
+ order.ownerId=owner;order.method=owner?'Revisão manual':'revisar';order.reason=owner?'Responsável definido manualmente nesta sessão.':'Aguardando definição manual do responsável.';
+ state.dirty=true;state.downloaded=false;$('downloadSuccess').hidden=true;renderSummary();renderTable();
+ message(owner?'Responsável atualizado para a ordem '+order.wo+'.'+(state.pending?' Ela saiu da lista porque agora já tem um responsável.':''):'A ordem '+order.wo+' voltou para a revisão.');
+ $('ordersTitle').focus({preventScroll:true});
 });
+for(let i=1;i<=3;i++)$('step'+i).addEventListener('click',()=>{if(!state.busy){message('');stage(i);}});
+$('backToFiles').addEventListener('click',()=>{message('');stage(1);ready();});
+$('backToReview').addEventListener('click',()=>{message('');stage(2);});
+$('navDownloads').addEventListener('click',()=>{if(!state.orders.length)return;message('');renderSummary();stage(3);});
+
 function timestamp(){const d=new Date();return d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'_'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+String(d.getSeconds()).padStart(2,'0');}
 function outputName(id,stamp){return (id==='pending'?'REVISAR':slug(state.matrix.owners.find(o=>o.id===id)?.name))+'_'+stamp+'.xlsx';}
-function downloaded(complete=false){if(complete)state.dirty=false; $('step2').classList.remove('current');$('step3').classList.add('current');message('Download gerado no navegador. Confira os arquivos antes de compartilhar.');}
-$('destinations').addEventListener('click',e=>{
- const b=e.target.closest('[data-download]');if(!b)return;const id=b.dataset.download,orders=groups().get(id);
- try{download(createXlsx(exportRows(orders,state.matrix)),outputName(id,timestamp()),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded();}catch(error){message(error.message,true);}
-});
+function downloaded(complete=false){if(complete){state.dirty=false;state.downloaded=true;}$('downloadSuccess').hidden=false;message('Download gerado. Confira o arquivo no navegador ou na pasta Downloads.');}
 $('downloadReport').addEventListener('click',()=>{
- try{download(createXlsx(exportRows(state.orders,state.matrix)),'DISTRIBUICAO_GERAL_'+timestamp()+'.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded(true);}catch(e){message(e.message,true);}
+ if(!state.orders.length)return;
+ try{download(createXlsx(exportRows(state.orders,state.matrix)),'DISTRIBUICAO_GERAL_'+timestamp()+'.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded(true);}catch(error){message(error.message,true);}
 });
 $('downloadZip').addEventListener('click',()=>{
+ if(!state.orders.length)return;
  try{
- const stamp=timestamp(),files=[...groups()].map(([id,orders])=>({name:outputName(id,stamp),data:createXlsx(exportRows(orders,state.matrix))}));
- files.push({name:'DISTRIBUICAO_GERAL_'+stamp+'.xlsx',data:createXlsx(exportRows(state.orders,state.matrix))});
- const pending=state.orders.filter(o=>!o.ownerId).length;
- files.push({name:'LEIA-ME.txt',data:'RotaOS — Distribuição de ordens de serviço\r\n'+state.orders.length+' ordens de serviço; '+pending+' pendentes de revisão.\r\nQuando houver pendências, elas estarão no arquivo REVISAR, incluído no pacote.\r\nResponsáveis escolhidos manualmente valem apenas nesta sessão.\r\nAs planilhas contêm status, início previsto e critério de distribuição.\r\nLinhas de rodapé ignoradas: '+state.schedule.ignored.length+'.\r\nConfira a distribuição antes de compartilhar.'});
- download(makeZip(files),'ROTAOS_'+stamp+'.zip','application/zip');downloaded(true);
- }catch(e){message(e.message,true);}
+  const stamp=timestamp(),files=[...groups()].map(([id,orders])=>({name:outputName(id,stamp),data:createXlsx(exportRows(orders,state.matrix))}));
+  files.push({name:'DISTRIBUICAO_GERAL_'+stamp+'.xlsx',data:createXlsx(exportRows(state.orders,state.matrix))});
+  files.push({name:'LEIA-ME.txt',data:'RotaOS - Distribuição de ordens de serviço\r\n'+state.orders.length+' ordens; '+state.orders.filter(o=>!o.ownerId).length+' sem responsável.\r\nQuando houver pendências, elas estão em REVISAR.\r\nAs escolhas manuais valem apenas para esta sessão.\r\nConfira os arquivos antes de compartilhar.'});
+  download(makeZip(files),'ROTAOS_'+stamp+'.zip','application/zip');downloaded(true);
+ }catch(error){message(error.message,true);}
 });
-$('closeDialog').addEventListener('click',()=>$('dialog').close());
-$('dialog').addEventListener('click',e=>{if(e.target===$('dialog')){const r=$('dialog').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('dialog').close();}});
-$('help').addEventListener('click',()=>dialog('Da planilha para cada responsável','<ol><li>Selecione a matriz. Cada coluna deve ter o nome de um responsável e os códigos dos equipamentos abaixo. Separe vários códigos por vírgula ou ponto e vírgula.</li><li>Selecione o planejamento com as colunas Work Order e Location. Description, Status, Target Start e Work Group são reconhecidos quando presentes.</li><li>Clique em distribuir. Confira as pendências e escolha um responsável nas linhas que precisarem de revisão.</li><li>Baixe um Excel por destino, um relatório geral ou o pacote ZIP. As pendências também são incluídas.</li></ol><p>São aceitos arquivos .xlsx de até 20 MB. Arquivos com senha não são suportados. Use uma versão atual do Chrome ou Edge.</p><p>Na versão publicada, basta abrir o link: adicionar como aplicativo é opcional. Após o primeiro acesso completo, o RotaOS pode abrir sem internet. As planilhas precisam ser selecionadas a cada sessão.</p><p>Os códigos exatos têm prioridade. Depois, o sistema procura o equipamento anterior ao hífen, a família de letras mais específica seguida de números e a turma no texto. A LOCATION tem prioridade sobre o grupo executor e sobre uma turma divergente na descrição. Se a LOCATION tiver vários responsáveis, a turma pode desempatar entre eles. Sem definição suficiente, a ordem fica pendente. O sistema não escolhe o primeiro responsável disponível.</p>'));
-$('privacy').addEventListener('click',()=>dialog('Seus arquivos nesta sessão','<p>A leitura e a separação das planilhas acontecem no seu navegador. Este aplicativo não envia o conteúdo dos arquivos para um servidor, não possui banco de dados remoto e não salva planilhas no armazenamento do navegador. A versão PWA guarda somente os arquivos do aplicativo para abrir sem internet após o primeiro acesso.</p><p>Ao atualizar ou fechar esta página, será necessário selecionar os arquivos novamente. Os arquivos que você baixar continuam na pasta de downloads do computador.</p><p>A hospedagem entrega os arquivos do aplicativo ao navegador. O uso com dados corporativos deve seguir a política da empresa e a aprovação da área responsável.</p>'));
-$('matrixView').addEventListener('click',()=>{
- let matrix;try{matrix=state.matrix||parseMatrix(state.matrixSheets[Number($('matrixSheet').value)]?.rows||[]);}catch{dialog('Matriz de responsáveis','<p>Selecione uma matriz de responsabilidades para consultar os responsáveis e seus códigos.</p>');return;}
- dialog('Matriz de responsáveis','<p>'+matrix.owners.length+' responsáveis · '+matrix.bindings.size+' códigos · '+matrix.conflicts.length+' códigos compartilhados.</p>'+matrix.owners.map(o=>'<details><summary><b>'+esc(o.name)+'</b> · '+o.locations.length+' códigos</summary><p class="codes">'+o.locations.map(esc).join(' · ')+'</p></details>').join('')+(matrix.conflicts.length?'<h3>Códigos compartilhados</h3><p>A turma da descrição pode identificar um dos responsáveis vinculados. Sem essa definição, estas locations exigem revisão. O grupo executor não desempata vínculos.</p><table><thead><tr><th>Código</th><th>Responsáveis</th></tr></thead><tbody>'+matrix.conflicts.map(c=>'<tr><td>'+esc(c.code)+'</td><td>'+c.owners.map(o=>esc(o.name)).join('<br>')+'</td></tr>').join('')+'</tbody></table>':''));
+$('destinations').addEventListener('click',event=>{
+ const button=event.target.closest('[data-download]');if(!button)return;
+ const id=button.dataset.download,orders=groups().get(id);if(!orders)return;
+ try{download(createXlsx(exportRows(orders,state.matrix)),outputName(id,timestamp()),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded();}catch(error){message(error.message,true);}
 });
-$('navDistribution').addEventListener('click',()=>{
- if(state.orders.length){state.pending=false;state.page=0;renderTable();}
- window.scrollTo({top:0,behavior:'smooth'});
-});
-$('navReview').addEventListener('click',()=>{
- if(!state.orders.length){message('Selecione a matriz e o planejamento e distribua as ordens para consultar as pendências.');return;}
- state.pending=true;state.page=0;$('search').value='';$('ownerFilter').value='';renderTable();$('ordersPanel').scrollIntoView({behavior:'smooth',block:'start'});
-});
-$('navDownloads').addEventListener('click',()=>{
- if(!state.orders.length){message('Os arquivos para download estarão disponíveis após a distribuição das ordens.');return;}
- $('downloadActions').scrollIntoView({behavior:'smooth',block:'center'});
-});
-$('reset').addEventListener('click',()=>{
+function reset(){
  if(state.busy)return;
- if(state.dirty&&!window.confirm('Iniciar uma nova distribuição encerra esta sessão. Baixe os resultados que deseja guardar antes de continuar. Continuar?'))return;
- state.matrixSheets=[];state.scheduleSheets=[];state.demo=false;clearResults();
- for(const kind of ['matrix','schedule']){$(kind+'Name').textContent=kind==='matrix'?'Selecione a matriz com os responsáveis e os códigos dos equipamentos.':'Selecione a lista de ordens de serviço enviada pelo planejamento.';$(kind+'Check').textContent='';$(kind+'SheetField').hidden=true;$(kind+'File').value='';}
- message('Sessão limpa. Selecione os arquivos para uma nova distribuição.');ready();window.scrollTo({top:0,behavior:'smooth'});
-});
+ if(state.dirty&&!window.confirm('Recomeçar apaga esta conferência. Você já baixou os resultados que deseja guardar?'))return;
+ state.demo=false;fileEmpty('matrix');fileEmpty('schedule');clearResults();message('');ready();
+}
+$('reset').addEventListener('click',reset);$('startAgain').addEventListener('click',reset);$('exitDemo').addEventListener('click',reset);
 $('demo').addEventListener('click',()=>{
- if(state.busy)return;
- if(state.dirty&&!window.confirm('Abrir a demonstração substitui a distribuição atual. Continuar?'))return;
- setSheets('matrix',[{name:'Matriz fictícia',rows:[['Responsável A (Turma A)','Responsável B (Turma B)','Equipe Técnica (Manutenção)'],['EQP101','EQP201','BOM'],['EQP102','EQP202','EQP102']]}],'Matriz de demonstração · dados fictícios');
- setSheets('schedule',[{name:'Planejamento fictício',rows:[['Work Order','Description','Location','Status','Target Start'],['WO100001','Inspeção mensal da unidade 101','EQP101','WAPPR',46310],['WO100002','Verificação da bomba auxiliar','BOM903-D002','WAPPR',46311],['WO100003','Inspeção dos ventiladores — Turma B','GERAL','WSCH',46312],['WO100004','Inspeção da unidade 102','EQP102','WAPPR',46313],['WO100005','Inspeção de equipamento sem cadastro','NOVO901','WAPPR',46314],['WO100006','Inspeção da unidade 202','EQP202-D001','WAPPR',46315],['Number of Records:',6]]}],'Planejamento de demonstração · dados fictícios');
+ if(state.busy||!mayReplace())return;
+ clearResults();
+ setSheets('matrix',[{name:'Matriz de exemplo',rows:[['Responsável A (Turma A)','Responsável B (Turma B)','Equipe Técnica (Manutenção)'],['EQP101','EQP201','BOM'],['EQP102','EQP202','EQP102']]}],'Matriz de exemplo.xlsx');
+ setSheets('schedule',[{name:'Planejamento de exemplo',rows:[['Work Order','Description','Location','Status','Target Start'],['WO100001','Inspeção mensal da unidade 101','EQP101','WAPPR',46310],['WO100002','Verificação da bomba auxiliar','BOM903-D002','WAPPR',46311],['WO100003','Inspeção dos ventiladores - Turma B','GERAL','WSCH',46312],['WO100004','Inspeção da unidade 102','EQP102','WAPPR',46313],['WO100005','Inspeção de equipamento sem cadastro','NOVO901','WAPPR',46314],['WO100006','Inspeção da unidade 202','EQP202-D001','WAPPR',46315],['Number of Records:',6]]}],'Planejamento de exemplo.xlsx');
  state.demo=true;ready();process();
 });
-ready();
-
+$('help').addEventListener('click',()=>dialog('Três passos para separar as ordens','<ol><li><b>Escolha os arquivos.</b> Selecione a matriz, que informa os responsáveis pelos equipamentos, e o planejamento com as ordens. Use Excel .xlsx sem senha, até 20 MB por arquivo.</li><li><b>Confira os responsáveis.</b> Veja os totais. Nas ordens sem responsável, escolha o nome correto. Você também pode corrigir uma atribuição existente. A alteração vale imediatamente.</li><li><b>Baixe as planilhas.</b> O ZIP reúne os arquivos por responsável e o relatório geral. Ordens ainda sem responsável entram no arquivo REVISAR.</li></ol><p><b>O código do equipamento (LOCATION) tem prioridade</b>, mesmo quando a ordem vier como OPERATOR. Se houver mais de um responsável e a turma não resolver o vínculo, você decide na revisão.</p><p>Você pode voltar às etapas sem perder a conferência. Se trocar os arquivos, mudar a aba, atualizar ou fechar a página, a distribuição precisará ser feita novamente. Baixe os resultados antes.</p>'));
+$('privacy').addEventListener('click',()=>dialog('Seus arquivos ficam neste computador','<p>A leitura das planilhas e a separação das ordens acontecem no seu navegador. O RotaOS não envia o conteúdo para um servidor e não altera os arquivos originais.</p><p>As planilhas e as escolhas feitas na tela existem apenas nesta sessão. Ao fechar ou atualizar a página, selecione os arquivos novamente. Os downloads que você já guardou continuam no computador.</p>'));
+$('matrixView').addEventListener('click',()=>{
+ if(!state.matrix)return;
+ const matrix=state.matrix;
+ dialog('Matriz de responsáveis','<p>'+matrix.owners.length+' responsáveis e '+matrix.bindings.size+' códigos de equipamento. Abra um nome para consultar seus códigos.</p>'+matrix.owners.map(o=>'<details><summary><b>'+esc(o.name)+'</b> · '+o.locations.length+' códigos</summary><p>'+o.locations.map(esc).join(' · ')+'</p></details>').join('')+(matrix.conflicts.length?'<h3>Códigos compartilhados</h3><p>Quando a descrição não indicar uma turma que resolva o vínculo, esses códigos precisam de revisão.</p><table><thead><tr><th>Código</th><th>Responsáveis</th></tr></thead><tbody>'+matrix.conflicts.map(c=>'<tr><td>'+esc(c.code)+'</td><td>'+c.owners.map(o=>esc(o.name)).join('<br>')+'</td></tr>').join('')+'</tbody></table>':''));
+});
+for(const id of ['closeDialog','dialogDone'])$(id).addEventListener('click',()=>$('dialog').close());
+$('dialog').addEventListener('click',event=>{if(event.target===$('dialog')){const rect=$('dialog').getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)$('dialog').close();}});
 window.addEventListener('beforeunload',event=>{if(state.dirty){event.preventDefault();event.returnValue='';}});
+stage(1,false);ready();
+
+let darkMode=false;
+$('themeToggle').addEventListener('click',()=>{
+ darkMode=!darkMode;
+ $('appBody').classList.toggle('dark-mode',darkMode);
+ $('themeToggle').setAttribute('aria-pressed',String(darkMode));
+ const action=darkMode?'Ativar modo claro':'Ativar modo escuro';
+ $('themeToggle').setAttribute('aria-label',action);
+ $('themeToggle').setAttribute('title',action);
+ $('themeLabel').textContent=darkMode?'Modo claro':'Modo escuro';
+ $('themeMoon').hidden=darkMode;
+ $('themeSun').hidden=!darkMode;
+});

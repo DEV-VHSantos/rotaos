@@ -3,7 +3,7 @@ let installPrompt=null,waitingWorker=null,updating=false;
 const pwaStatus=()=>{
  const el=pwaElement('connectionStatus');
  el.classList.toggle('offline',!navigator.onLine);
- el.innerHTML='<span></span>'+(!navigator.onLine?' Sem conexão':' Processamento local');
+ el.innerHTML='<span class="status-dot"></span>'+(!navigator.onLine?'Sem conexão · arquivos locais':'Arquivos no seu computador');
 };
 const showUpdate=worker=>{waitingWorker=worker;pwaElement('updateNotice').hidden=false;};
 pwaElement('installApp').addEventListener('click',async()=>{

@@ -1,6 +1,6 @@
 /* RotaOS: somente arquivos públicos do aplicativo entram no cache. */
 const CACHE_PREFIX='rotaos-'+encodeURIComponent(self.registration.scope)+'-';
-const CACHE_NAME=CACHE_PREFIX+'1.0.0-85d74f633079';
+const CACHE_NAME=CACHE_PREFIX+'1.1.0-478c2cd805ac';
 const ASSETS=["index.html","style.css","logo.svg","app.mjs","engine.mjs","io.mjs","pwa.mjs","manifest.webmanifest","icons/icon-192.png","icons/icon-512.png","icons/maskable-512.png","icons/apple-touch-icon.png"];
 const urls=ASSETS.map(file=>new URL(file,self.registration.scope).href);
 const indexURL=new URL('index.html',self.registration.scope).href;
