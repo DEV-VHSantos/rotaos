@@ -171,21 +171,21 @@ function outputName(id,stamp){return (id==='pending'?'REVISAR':slug(state.matrix
 function downloaded(complete=false){if(complete){state.dirty=false;state.downloaded=true;}$('downloadSuccess').hidden=false;message('Download gerado. Confira o arquivo no navegador ou na pasta Downloads.');}
 $('downloadReport').addEventListener('click',()=>{
  if(!state.orders.length)return;
- try{download(createXlsx(exportRows(state.orders,state.matrix)),'DISTRIBUICAO_GERAL_'+timestamp()+'.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded(true);}catch(error){message(error.message,true);}
+ try{download(createXlsx(exportRows(state.orders,state.matrix),{includeMaximo:true}),'DISTRIBUICAO_GERAL_'+timestamp()+'.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded(true);}catch(error){message(error.message,true);}
 });
 $('downloadZip').addEventListener('click',()=>{
  if(!state.orders.length)return;
  try{
-  const stamp=timestamp(),files=[...groups()].map(([id,orders])=>({name:outputName(id,stamp),data:createXlsx(exportRows(orders,state.matrix))}));
-  files.push({name:'DISTRIBUICAO_GERAL_'+stamp+'.xlsx',data:createXlsx(exportRows(state.orders,state.matrix))});
-  files.push({name:'LEIA-ME.txt',data:'RotaOS - Distribuição de ordens de serviço\r\n'+state.orders.length+' ordens; '+state.orders.filter(o=>!o.ownerId).length+' sem responsável.\r\nQuando houver pendências, elas estão em REVISAR.\r\nAs escolhas manuais valem apenas para esta sessão.\r\nConfira os arquivos antes de compartilhar.'});
+  const stamp=timestamp(),files=[...groups()].map(([id,orders])=>({name:outputName(id,stamp),data:createXlsx(exportRows(orders,state.matrix),{includeMaximo:true})}));
+  files.push({name:'DISTRIBUICAO_GERAL_'+stamp+'.xlsx',data:createXlsx(exportRows(state.orders,state.matrix),{includeMaximo:true})});
+  files.push({name:'LEIA-ME.txt',data:'RotaOS - Distribuição de ordens de serviço\r\n'+state.orders.length+' ordens; '+state.orders.filter(o=>!o.ownerId).length+' sem responsável.\r\nQuando houver pendências, elas estão em REVISAR.\r\nAs escolhas manuais valem apenas para esta sessão.\r\nCada Excel contém a aba MAXIMO, com as OS separadas por vírgula na coluna C, por responsável. Copie uma célula de cada vez para o campo de OS do Maximo. Em listas grandes, repita para cada lote. Confira também o responsável no Maximo antes de atribuir.\r\nConfira os arquivos antes de compartilhar.'});
   download(makeZip(files),'ROTAOS_'+stamp+'.zip','application/zip');downloaded(true);
  }catch(error){message(error.message,true);}
 });
 $('destinations').addEventListener('click',event=>{
  const button=event.target.closest('[data-download]');if(!button)return;
  const id=button.dataset.download,orders=groups().get(id);if(!orders)return;
- try{download(createXlsx(exportRows(orders,state.matrix)),outputName(id,timestamp()),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded();}catch(error){message(error.message,true);}
+ try{download(createXlsx(exportRows(orders,state.matrix),{includeMaximo:true}),outputName(id,timestamp()),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');downloaded();}catch(error){message(error.message,true);}
 });
 function reset(){
  if(state.busy)return;
@@ -200,7 +200,7 @@ $('demo').addEventListener('click',()=>{
  setSheets('schedule',[{name:'Planejamento de exemplo',rows:[['Work Order','Description','Location','Status','Target Start'],['WO100001','Inspeção mensal da unidade 101','EQP101','WAPPR',46310],['WO100002','Verificação da bomba auxiliar','BOM903-D002','WAPPR',46311],['WO100003','Inspeção dos ventiladores - Turma B','GERAL','WSCH',46312],['WO100004','Inspeção da unidade 102','EQP102','WAPPR',46313],['WO100005','Inspeção de equipamento sem cadastro','NOVO901','WAPPR',46314],['WO100006','Inspeção da unidade 202','EQP202-D001','WAPPR',46315],['Number of Records:',6]]}],'Planejamento de exemplo.xlsx');
  state.demo=true;ready();process();
 });
-$('help').addEventListener('click',()=>dialog('Três passos para separar as ordens','<ol><li><b>Escolha os arquivos.</b> Selecione a matriz, que informa os responsáveis pelos equipamentos, e o planejamento com as ordens. Use Excel .xlsx sem senha, até 20 MB por arquivo.</li><li><b>Confira os responsáveis.</b> Veja os totais. Nas ordens sem responsável, escolha o nome correto. Você também pode corrigir uma atribuição existente. A alteração vale imediatamente.</li><li><b>Baixe as planilhas.</b> O ZIP reúne os arquivos por responsável e o relatório geral. Ordens ainda sem responsável entram no arquivo REVISAR.</li></ol><p><b>O código do equipamento (LOCATION) tem prioridade</b>, mesmo quando a ordem vier como OPERATOR. Se houver mais de um responsável e a turma não resolver o vínculo, você decide na revisão.</p><p>Você pode voltar às etapas sem perder a conferência. Se trocar os arquivos, mudar a aba, atualizar ou fechar a página, a distribuição precisará ser feita novamente. Baixe os resultados antes.</p>'));
+$('help').addEventListener('click',()=>dialog('Três passos para separar as ordens','<ol><li><b>Escolha os arquivos.</b> Selecione a matriz, que informa os responsáveis pelos equipamentos, e o planejamento com as ordens. Use Excel .xlsx sem senha, até 20 MB por arquivo.</li><li><b>Confira os responsáveis.</b> Veja os totais. Nas ordens sem responsável, escolha o nome correto. Você também pode corrigir uma atribuição existente. A alteração vale imediatamente.</li><li><b>Baixe as planilhas.</b> O ZIP reúne os arquivos por responsável e o relatório geral. Ordens ainda sem responsável entram no arquivo REVISAR. Cada Excel inclui a aba <b>MAXIMO</b>: copie a célula da coluna C, a partir de C2, e cole no campo de OS do Maximo. No relatório geral, cada responsável tem sua própria lista.</li></ol><p><b>O código do equipamento (LOCATION) tem prioridade</b>, mesmo quando a ordem vier como OPERATOR. Se houver mais de um responsável e a turma não resolver o vínculo, você decide na revisão.</p><p>Você pode voltar às etapas sem perder a conferência. Se trocar os arquivos, mudar a aba, atualizar ou fechar a página, a distribuição precisará ser feita novamente. Baixe os resultados antes.</p>'));
 $('privacy').addEventListener('click',()=>dialog('Seus arquivos ficam neste computador','<p>A leitura das planilhas e a separação das ordens acontecem no seu navegador. O RotaOS não envia o conteúdo para um servidor e não altera os arquivos originais.</p><p>As planilhas e as escolhas feitas na tela existem apenas nesta sessão. Ao fechar ou atualizar a página, selecione os arquivos novamente. Os downloads que você já guardou continuam no computador.</p>'));
 $('matrixView').addEventListener('click',()=>{
  if(!state.matrix)return;
